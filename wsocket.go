@@ -24,7 +24,7 @@ type Communicator interface {
 
 type Client struct {
 	write      chan interface{}
-	read       chan interface{}
+	read       chan []byte
 	errc       chan error
 	closeState bool
 
@@ -40,7 +40,7 @@ func (c *Client) Close() {
 	close(c.read)
 }
 
-func (c *Client) GetRead() <-chan interface{} {
+func (c *Client) GetRead() <-chan []byte {
 	return c.read
 }
 
@@ -61,13 +61,14 @@ func concurrentRead(cl *Client) {
 		// event := reflect.New(cl.incomingType).Interface()
 		event := json.RawMessage{}
 		err := cl.co.ReadJSON(&event)
-		log.Println("Received WebSocket Read", event, err)
+		log.Println("Received WebSocket Read")
 		if err != nil {
 			if cl.closeState == false {
 				cl.errc <- err
 			}
 		} else {
 			if cl.closeState == false {
+				log.Println("send data to read channel if client")
 				cl.read <- event
 			}
 		}
@@ -97,7 +98,7 @@ func NewClient(w http.ResponseWriter, r *http.Request) (*Client, error) {
 		return nil, err
 	}
 
-	cl := &Client{co: conn, write: make(chan interface{}), read: make(chan interface{}), errc: make(chan error), closeState: false}
+	cl := &Client{co: conn, write: make(chan interface{}), read: make(chan []byte), errc: make(chan error), closeState: false}
 	go concurentWrite(cl)
 	go concurrentRead(cl)
 	return cl, nil
