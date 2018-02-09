@@ -3,9 +3,10 @@ package wsocket
 import (
 	"encoding/json"
 	"errors"
-	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
+
+	"github.com/gorilla/websocket"
 )
 
 var (
@@ -61,16 +62,16 @@ func concurrentRead(cl *Client) {
 		// event := reflect.New(cl.incomingType).Interface()
 		event := json.RawMessage{}
 		err := cl.co.ReadJSON(&event)
-		log.Println("Received WebSocket Read")
-		if err != nil {
-			if cl.closeState == false {
+		if cl.closeState == false {
+			if err != nil {
 				cl.errc <- err
-			}
-		} else {
-			if cl.closeState == false {
-				log.Println("send data to read channel if client")
+				return
+			} else {
+				log.Println("Socket received data", string(event))
 				cl.read <- event
 			}
+		} else {
+			return
 		}
 	}
 }
