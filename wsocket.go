@@ -3,6 +3,7 @@ package wsocket
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 
@@ -23,7 +24,7 @@ type Communicator interface {
 	SendMessage(message interface{}) error
 }
 
-type Client struct {
+type Socket struct {
 	write      chan interface{}
 	read       chan []byte
 	errc       chan error
@@ -32,7 +33,7 @@ type Client struct {
 	co *websocket.Conn
 }
 
-func (c *Client) Close() {
+func (c *Socket) Close() {
 	log.Println("Closing WebSocket")
 	c.co.Close()
 	c.closeState = true
@@ -41,23 +42,23 @@ func (c *Client) Close() {
 	close(c.read)
 }
 
-func (c *Client) GetRead() <-chan []byte {
+func (c *Socket) GetRead() <-chan []byte {
 	return c.read
 }
 
-func (c *Client) GetError() <-chan error {
+func (c *Socket) GetError() <-chan error {
 	return c.errc
 }
 
-func (c *Client) GetWrite() chan<- interface{} {
+func (c *Socket) GetWrite() chan<- interface{} {
 	return c.write
 }
 
-func (c *Client) SendMessage(message interface{}) {
+func (c *Socket) SendMessage(message interface{}) {
 	c.GetWrite() <- message
 }
 
-func concurrentRead(cl *Client) {
+func concurrentRead(cl *Socket) {
 	for {
 		// event := reflect.New(cl.incomingType).Interface()
 		event := json.RawMessage{}
@@ -65,9 +66,12 @@ func concurrentRead(cl *Client) {
 		if cl.closeState == false {
 			if err != nil {
 				cl.errc <- err
-				return
+				// return
+				if err == io.ErrUnexpectedEOF {
+					return
+				}
 			} else {
-				log.Println("Socket received data", string(event))
+				// log.Println("Socket received data", string(event))
 				cl.read <- event
 			}
 		} else {
@@ -76,7 +80,7 @@ func concurrentRead(cl *Client) {
 	}
 }
 
-func concurentWrite(cl *Client) {
+func concurentWrite(cl *Socket) {
 	for {
 		select {
 		case json, ok := <-cl.write:
@@ -84,6 +88,7 @@ func concurentWrite(cl *Client) {
 				if err := cl.co.WriteJSON(json); err != nil {
 					if cl.closeState == false {
 						cl.errc <- err
+						return
 					}
 				}
 			} else {
@@ -93,13 +98,27 @@ func concurentWrite(cl *Client) {
 	}
 }
 
-func NewClient(w http.ResponseWriter, r *http.Request) (*Client, error) {
+func ConnectSocket(addr string) (*Socket, error) {
+	conn, _, err := websocket.DefaultDialer.Dial(addr, nil)
+	if err != nil {
+		log.Fatal("dial:", err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	cl := &Socket{co: conn, write: make(chan interface{}), read: make(chan []byte), errc: make(chan error), closeState: false}
+	go concurentWrite(cl)
+	go concurrentRead(cl)
+	return cl, nil
+}
+
+func AcceptNewSocket(w http.ResponseWriter, r *http.Request) (*Socket, error) {
 	conn, err := initSocket(w, r)
 	if err != nil {
 		return nil, err
 	}
 
-	cl := &Client{co: conn, write: make(chan interface{}), read: make(chan []byte), errc: make(chan error), closeState: false}
+	cl := &Socket{co: conn, write: make(chan interface{}), read: make(chan []byte), errc: make(chan error), closeState: false}
 	go concurentWrite(cl)
 	go concurrentRead(cl)
 	return cl, nil
