@@ -3,7 +3,6 @@ package wsocket
 import (
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net/http"
 
@@ -67,10 +66,9 @@ func concurrentRead(cl *Socket) {
 			cl.Close()
 			return
 		} else {
-				// log.Println("Socket received data", string(event))
-				cl.read <- event
-			}
-		} 
+			// log.Println("Socket received data", string(event))
+			cl.read <- event
+		}
 	}
 }
 
