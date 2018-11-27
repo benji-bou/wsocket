@@ -63,20 +63,14 @@ func concurrentRead(cl *Socket) {
 		// event := reflect.New(cl.incomingType).Interface()
 		event := json.RawMessage{}
 		err := cl.co.ReadJSON(&event)
-		if cl.closeState == false {
-			if err != nil {
-				cl.errc <- err
-				// return
-				if err == io.ErrUnexpectedEOF {
-					return
-				}
-			} else {
+		if err != nil {
+			cl.Close()
+			return
+		} else {
 				// log.Println("Socket received data", string(event))
 				cl.read <- event
 			}
-		} else {
-			return
-		}
+		} 
 	}
 }
 
