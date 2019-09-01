@@ -36,9 +36,6 @@ func (c *Socket) Close() {
 	log.Println("Closing WebSocket")
 	c.co.Close()
 	c.closeState = true
-	close(c.errc)
-	close(c.write)
-	close(c.read)
 }
 
 func (c *Socket) GetRead() <-chan []byte {
@@ -54,7 +51,10 @@ func (c *Socket) GetWrite() chan<- interface{} {
 }
 
 func (c *Socket) SendMessage(message interface{}) {
-	c.GetWrite() <- message
+	if c.closeState == false {
+		c.GetWrite() <- message
+
+	}
 }
 
 func concurrentRead(cl *Socket) {
@@ -63,6 +63,8 @@ func concurrentRead(cl *Socket) {
 		event := json.RawMessage{}
 		err := cl.co.ReadJSON(&event)
 		if err != nil {
+			cl.Close()
+			cl.errc <- err
 			return
 		} else {
 			// log.Println("Socket received data", string(event))
@@ -85,7 +87,9 @@ func concurentWrite(cl *Socket) {
 			} else {
 				return
 			}
+
 		}
+
 	}
 }
 
