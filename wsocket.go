@@ -51,6 +51,7 @@ func (c *Socket) GetWrite() chan<- interface{} {
 }
 
 func (c *Socket) SendMessage(message interface{}) {
+	// color.Blue("send new Message %v to %p", message, c)
 	if c.closeState == false {
 		c.GetWrite() <- message
 
