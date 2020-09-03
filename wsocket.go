@@ -44,12 +44,24 @@ func (c *Socket) Error() <-chan error {
 	return c.errc
 }
 
+<<<<<<< HEAD
 func (c *Socket) Write(messagType int) chan<- []byte {
 	switch messagType {
 	case websocket.BinaryMessage:
 		return c.bwrite
 	case websocket.TextMessage:
 		return c.twrite
+=======
+func (c *Socket) GetWrite() chan<- interface{} {
+	return c.write
+}
+
+func (c *Socket) SendMessage(message interface{}) {
+	// color.Blue("send new Message %v to %p", message, c)
+	if c.closeState == false {
+		c.GetWrite() <- message
+
+>>>>>>> c277c2c0ed1dfc8294c8f94bae36b736c1fd89c8
 	}
 	return c.twrite
 }
