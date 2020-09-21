@@ -1,9 +1,13 @@
 package wsocket
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 
+	"encoding"
+
+	"github.com/fatih/color"
 	"github.com/gorilla/websocket"
 )
 
@@ -25,13 +29,17 @@ type Socket struct {
 }
 
 func (c *Socket) Close() {
-	log.Println("Closing WebSocket")
+	color.Red("Closing WebSocket")
 	c.co.Close()
 	c.closeState = true
 }
 
-func (c *Socket) Read(messagType int) <-chan []byte {
-	switch messagType {
+func (c *Socket) Read(messagesType ...int) <-chan []byte {
+	messageType := websocket.TextMessage
+	if len(messagesType) > 0 {
+		messageType = messagesType[0]
+	}
+	switch messageType {
 	case websocket.BinaryMessage:
 		return c.bread
 	case websocket.TextMessage:
@@ -44,26 +52,48 @@ func (c *Socket) Error() <-chan error {
 	return c.errc
 }
 
-<<<<<<< HEAD
-func (c *Socket) Write(messagType int) chan<- []byte {
-	switch messagType {
+func (c *Socket) Write(messagesType ...int) chan<- []byte {
+	messageType := websocket.TextMessage
+	if len(messagesType) > 0 {
+		messageType = messagesType[0]
+	}
+	switch messageType {
 	case websocket.BinaryMessage:
 		return c.bwrite
 	case websocket.TextMessage:
 		return c.twrite
-=======
-func (c *Socket) GetWrite() chan<- interface{} {
-	return c.write
-}
-
-func (c *Socket) SendMessage(message interface{}) {
-	// color.Blue("send new Message %v to %p", message, c)
-	if c.closeState == false {
-		c.GetWrite() <- message
-
->>>>>>> c277c2c0ed1dfc8294c8f94bae36b736c1fd89c8
 	}
 	return c.twrite
+}
+
+func (c *Socket) SendMessage(i interface{}) {
+	switch mes := i.(type) {
+	case []byte:
+		c.Write(websocket.BinaryMessage) <- mes
+	case string:
+		c.Write(websocket.TextMessage) <- []byte(mes)
+	case encoding.BinaryMarshaler:
+		data, err := mes.MarshalBinary()
+		if err != nil {
+			color.Red("Failed to marshal into binary with err : %v", err)
+			return
+		}
+		c.Write(websocket.BinaryMessage) <- data
+	case encoding.TextMarshaler:
+		data, err := mes.MarshalText()
+		if err != nil {
+			color.Red("Failed to marshal into text with err : %v", err)
+			return
+		}
+		c.Write(websocket.TextMessage) <- data
+	default:
+		data, err := json.Marshal(i)
+		if err != nil {
+			color.Red("Failed to marshal into json with err : %v", err)
+			return
+		}
+		c.Write(websocket.TextMessage) <- data
+	}
 }
 
 func (c *Socket) concurrentRead() {
@@ -71,10 +101,10 @@ func (c *Socket) concurrentRead() {
 
 		t, b, err := c.co.ReadMessage()
 		if err != nil {
+			color.Red("Error reading from socket: %v", err)
 			select {
 			case c.errc <- err:
 			default:
-				log.Println(err)
 			}
 			return
 		}
@@ -97,25 +127,26 @@ func (c *Socket) concurentWrite() {
 	for {
 		select {
 		case b := <-c.bwrite:
-
 			if err := c.co.WriteMessage(websocket.BinaryMessage, b); err != nil {
+				color.Red("Error writing to socket: %v", err)
 				if c.closeState == false {
 					select {
 					case c.errc <- err:
 					default:
-						log.Println("unable to send bwrite error to channel", err)
+						color.Red("unable to send bwrite error to channel %v", err)
 					}
 					return
 				}
-
 			}
 		case t := <-c.twrite:
 			if err := c.co.WriteMessage(websocket.TextMessage, t); err != nil {
+				color.Red("Error writing to socket: %v", err)
+
 				if c.closeState == false {
 					select {
 					case c.errc <- err:
 					default:
-						log.Println("unable to send twrite error to channel", err)
+						color.Red("unable to send twrite error to channel %v", err)
 					}
 					return
 				}
