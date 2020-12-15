@@ -3,9 +3,11 @@ package wsocket
 import (
 	"encoding"
 	"encoding/json"
-	"github.com/gorilla/websocket"
+	"fmt"
 	"log"
 	"net/http"
+
+	"github.com/gorilla/websocket"
 )
 
 var (
@@ -16,9 +18,8 @@ var (
 
 type Socket struct {
 	twrite     chan []byte
-	tread      chan []byte
+	read       chan []byte
 	bwrite     chan []byte
-	bread      chan []byte
 	errc       chan error
 	closeState bool
 
@@ -31,18 +32,8 @@ func (c *Socket) Close() {
 	c.closeState = true
 }
 
-func (c *Socket) Read(messagesType ...int) <-chan []byte {
-	messageType := websocket.TextMessage
-	if len(messagesType) > 0 {
-		messageType = messagesType[0]
-	}
-	switch messageType {
-	case websocket.BinaryMessage:
-		return c.bread
-	case websocket.TextMessage:
-		return c.tread
-	}
-	return c.tread
+func (c *Socket) Read() <-chan []byte {
+	return c.read
 }
 
 func (c *Socket) Error() <-chan error {
@@ -63,7 +54,10 @@ func (c *Socket) Write(messagesType ...int) chan<- []byte {
 	return c.twrite
 }
 
-func (c *Socket) SendMessage(i interface{}) {
+func (c *Socket) SendMessage(i interface{}) error {
+	if c.closeState == true {
+		return fmt.Errorf("Socket is closed")
+	}
 	switch mes := i.(type) {
 	case []byte:
 		c.Write(websocket.BinaryMessage) <- mes
@@ -72,50 +66,40 @@ func (c *Socket) SendMessage(i interface{}) {
 	case encoding.BinaryMarshaler:
 		data, err := mes.MarshalBinary()
 		if err != nil {
-			log.Printf("Failed to marshal into binary with err : %v\n", err)
-			return
+			return fmt.Errorf("Failed to marshal into binary with err : %w\n", err)
 		}
 		c.Write(websocket.BinaryMessage) <- data
 	case encoding.TextMarshaler:
 		data, err := mes.MarshalText()
 		if err != nil {
-			log.Printf("Failed to marshal into text with err : %v\n", err)
-			return
+			return fmt.Errorf("Failed to marshal into text with err : %w\n", err)
 		}
 		c.Write(websocket.TextMessage) <- data
 	default:
 		data, err := json.Marshal(i)
 		if err != nil {
-			log.Printf("Failed to marshal into json with err : %v\n", err)
-			return
+			return fmt.Errorf("Failed to marshal into json with err : %w\n", err)
 		}
 		c.Write(websocket.TextMessage) <- data
 	}
+	return nil
 }
 
 func (c *Socket) concurrentRead() {
 	for {
-
-		t, b, err := c.co.ReadMessage()
+		_, b, err := c.co.ReadMessage()
 		if err != nil {
-			log.Printf("Error reading from socket: %v\n", err)
+			log.Printf("Error reading from socket: %v - Closing it\n", err)
+			c.Close()
 			select {
 			case c.errc <- err:
 			default:
 			}
 			return
 		}
-		switch t {
-		case websocket.BinaryMessage:
-			select {
-			case c.bread <- b:
-			default:
-			}
-		case websocket.TextMessage:
-			select {
-			case c.tread <- b:
-			default:
-			}
+		select {
+		case c.read <- b:
+
 		}
 	}
 }
@@ -132,8 +116,8 @@ func (c *Socket) concurentWrite() {
 					default:
 						log.Printf("unable to send bwrite error to channel %v\n", err)
 					}
-					return
 				}
+				return
 			}
 		case t := <-c.twrite:
 			if err := c.co.WriteMessage(websocket.TextMessage, t); err != nil {
@@ -145,8 +129,8 @@ func (c *Socket) concurentWrite() {
 					default:
 						log.Printf("unable to send twrite error to channel %v\n", err)
 					}
-					return
 				}
+				return
 			}
 
 		}
@@ -162,7 +146,7 @@ func ConnectSocket(addr string) (*Socket, error) {
 	if err != nil {
 		return nil, err
 	}
-	cl := &Socket{co: conn, twrite: make(chan []byte, 256), tread: make(chan []byte, 256), bwrite: make(chan []byte, 256), bread: make(chan []byte, 256), errc: make(chan error), closeState: false}
+	cl := &Socket{co: conn, twrite: make(chan []byte, 256), read: make(chan []byte, 256), bwrite: make(chan []byte, 256), errc: make(chan error), closeState: false}
 	go cl.concurentWrite()
 	go cl.concurrentRead()
 	return cl, nil
@@ -174,7 +158,7 @@ func AcceptNewSocket(w http.ResponseWriter, r *http.Request) (*Socket, error) {
 		return nil, err
 	}
 
-	cl := &Socket{co: conn, twrite: make(chan []byte, 256), tread: make(chan []byte, 256), bwrite: make(chan []byte, 256), bread: make(chan []byte, 256), errc: make(chan error), closeState: false}
+	cl := &Socket{co: conn, twrite: make(chan []byte, 256), read: make(chan []byte, 256), bwrite: make(chan []byte, 256), errc: make(chan error), closeState: false}
 	go cl.concurentWrite()
 	go cl.concurrentRead()
 	return cl, nil
