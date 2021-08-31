@@ -4,10 +4,27 @@ import (
 	"encoding"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
+	"time"
 
 	"github.com/gorilla/websocket"
+)
+
+const (
+	// Time allowed to write a message to the peer.
+	writeWait = 10 * time.Second
+
+	// Time allowed to read the next pong message from the peer.
+	pongWait = 60 * time.Second
+
+	// Send pings to peer with this period. Must be less than pongWait.
+	pingPeriod = (pongWait * 9) / 10
+
+	// Maximum message size allowed from peer.
+	maxMessageSize = 512
 )
 
 var (
@@ -104,43 +121,74 @@ func (c *Socket) concurrentRead() {
 	}
 }
 
-func (c *Socket) concurentWrite() {
-	for {
+func (c *Socket) sendData(writer io.WriteCloser, data []byte, nextData <-chan []byte) error {
+	writer.Write(data)
+	n := len(nextData)
+	for i := 0; i < n; i++ {
+		writer.Write(<-nextData)
+	}
+	return writer.Close()
+}
+
+func (c *Socket) errAndClose(err error) {
+	log.Printf("Error writing to socket: %v\n", err)
+	if !c.closeState {
 		select {
-		case b := <-c.bwrite:
-			if err := c.co.WriteMessage(websocket.BinaryMessage, b); err != nil {
-				log.Printf("Error writing to socket: %v\n", err)
-				if c.closeState == false {
-					select {
-					case c.errc <- err:
-					default:
-						log.Printf("unable to send bwrite error to channel %v\n", err)
-					}
-				}
-				return
-			}
-		case t := <-c.twrite:
-			if err := c.co.WriteMessage(websocket.TextMessage, t); err != nil {
-				log.Printf("Error writing to socket: %v\n", err)
-
-				if c.closeState == false {
-					select {
-					case c.errc <- err:
-					default:
-						log.Printf("unable to send twrite error to channel %v\n", err)
-					}
-				}
-				return
-			}
-
+		case c.errc <- err:
+		default:
+			log.Printf("unable to send bwrite error to channel %v\n", err)
 		}
-
 	}
 }
 
-func ConnectSocket(addr string) (*Socket, error) {
-	conn, _, err := websocket.DefaultDialer.Dial(addr, nil)
-	if err != nil {
+func (c *Socket) concurentWrite() {
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		c.co.Close()
+	}()
+	for {
+		select {
+		case b := <-c.bwrite:
+
+			writer, err := c.co.NextWriter(websocket.BinaryMessage)
+			if err != nil {
+				c.errAndClose(err)
+				return
+			}
+			if err := c.sendData(writer, b, c.bwrite); err != nil {
+				c.errAndClose(err)
+				return
+			}
+
+		case t := <-c.twrite:
+			writer, err := c.co.NextWriter(websocket.TextMessage)
+			if err != nil {
+				c.errAndClose(err)
+				return
+			}
+			if err := c.sendData(writer, t, c.twrite); err != nil {
+				c.errAndClose(err)
+				return
+			}
+		case <-ticker.C:
+			c.co.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.co.WriteMessage(websocket.PingMessage, nil); err != nil {
+				c.errAndClose(err)
+				return
+			}
+		}
+	}
+}
+
+func ConnectSocket(addr string, header http.Header) (*Socket, error) {
+	conn, resp, err := websocket.DefaultDialer.Dial(addr, header)
+	if err == websocket.ErrBadHandshake {
+		log.Printf("handshake failed with status %d, %+v\n", resp.StatusCode, resp)
+		io.Copy(os.Stdout, resp.Body)
+		resp.Body.Close()
+		log.Fatalf("failed")
+	} else if err != nil {
 		log.Fatal("dial:", err)
 	}
 	if err != nil {
