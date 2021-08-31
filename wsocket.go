@@ -103,6 +103,12 @@ func (c *Socket) SendMessage(i interface{}) error {
 }
 
 func (c *Socket) concurrentRead() {
+	c.co.SetReadDeadline(time.Now().Add(pongWait))
+	c.co.SetPongHandler(func(appData string) error {
+		log.Printf("Receive pong %v\n", appData)
+		c.co.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
 	for {
 		_, b, err := c.co.ReadMessage()
 		if err != nil {
