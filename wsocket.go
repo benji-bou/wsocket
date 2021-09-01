@@ -103,6 +103,9 @@ func (c *Socket) SendMessage(i interface{}) error {
 }
 
 func (c *Socket) concurrentRead() {
+	defer func() {
+		c.Close()
+	}()
 	c.co.SetReadDeadline(time.Now().Add(pongWait))
 	c.co.SetPongHandler(func(appData string) error {
 		log.Printf("Receive pong %v\n", appData)
@@ -113,7 +116,6 @@ func (c *Socket) concurrentRead() {
 		_, b, err := c.co.ReadMessage()
 		if err != nil {
 			log.Printf("Error reading from socket: %v - Closing it\n", err)
-			c.Close()
 			select {
 			case c.errc <- err:
 			default:
@@ -151,7 +153,7 @@ func (c *Socket) concurentWrite() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.co.Close()
+		c.Close()
 	}()
 	for {
 		select {
