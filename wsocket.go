@@ -18,7 +18,7 @@ const (
 	writeWait = 10 * time.Second
 
 	// Time allowed to read the next pong message from the peer.
-	pongWait = 60 * time.Second
+	pongWait = 5 * time.Second
 
 	// Send pings to peer with this period. Must be less than pongWait.
 	pingPeriod = (pongWait * 9) / 10
@@ -33,20 +33,68 @@ var (
 	}
 )
 
-type Socket struct {
-	twrite     chan []byte
-	read       chan []byte
-	bwrite     chan []byte
-	errc       chan error
-	closeState bool
-
-	co *websocket.Conn
+type ChanDispatcher struct {
+	src chan interface{}
+	dst []chan<- interface{}
+	add chan chan<- interface{}
 }
 
-func (c *Socket) Close() {
+func NewChanDispatcher() (chan<- interface{}, *ChanDispatcher) {
+	source := make(chan interface{})
+	cd := &ChanDispatcher{src: source, dst: make([]chan<- interface{}, 0), add: make(chan chan<- interface{})}
+	go cd.run()
+	return source, cd
+}
+
+func (cd *ChanDispatcher) GetNewSubscriber() <-chan interface{} {
+	sub := make(chan interface{})
+	cd.add <- sub
+	return sub
+}
+
+func (cd *ChanDispatcher) closeAll() {
+	for _, d := range cd.dst {
+		close(d)
+	}
+	close(cd.add)
+	cd.dst = nil
+}
+
+func (cd *ChanDispatcher) run() {
+	for {
+		select {
+		case data, ok := <-cd.src:
+			if !ok {
+				cd.closeAll()
+				return
+			}
+			for _, d := range cd.dst {
+				d <- data
+			}
+		case newDst := <-cd.add:
+			cd.dst = append(cd.dst, newDst)
+		}
+	}
+}
+
+type Socket struct {
+	twrite chan []byte
+	read   chan []byte
+	bwrite chan []byte
+	errc   chan error
+
+	activityDispatcher *ChanDispatcher
+	activitySrc        chan<- interface{}
+	closingDispatcher  *ChanDispatcher
+	closingSrc         chan<- interface{}
+
+	Conn *websocket.Conn
+}
+
+func (c *Socket) handleClose() {
+	<-c.closingDispatcher.GetNewSubscriber()
 	log.Printf("Closing WebSocket")
-	c.co.Close()
-	c.closeState = true
+	c.Conn.Close()
 }
 
 func (c *Socket) Read() <-chan []byte {
@@ -57,138 +105,168 @@ func (c *Socket) Error() <-chan error {
 	return c.errc
 }
 
-func (c *Socket) Write(messagesType ...int) chan<- []byte {
-	messageType := websocket.TextMessage
-	if len(messagesType) > 0 {
-		messageType = messagesType[0]
-	}
+func (c *Socket) Write(messageType int, data []byte) error {
 	switch messageType {
 	case websocket.BinaryMessage:
-		return c.bwrite
+		select {
+		case c.bwrite <- data:
+		default:
+			return fmt.Errorf("unable to write bin data")
+		}
 	case websocket.TextMessage:
-		return c.twrite
-	}
-	return c.twrite
-}
-
-func (c *Socket) SendMessage(i interface{}) error {
-	if c.closeState == true {
-		return fmt.Errorf("Socket is closed")
-	}
-	switch mes := i.(type) {
-	case []byte:
-		c.Write(websocket.BinaryMessage) <- mes
-	case string:
-		c.Write(websocket.TextMessage) <- []byte(mes)
-	case encoding.BinaryMarshaler:
-		data, err := mes.MarshalBinary()
-		if err != nil {
-			return fmt.Errorf("Failed to marshal into binary with err : %w\n", err)
+		select {
+		case c.twrite <- data:
+		default:
+			return fmt.Errorf("unable to write text data")
 		}
-		c.Write(websocket.BinaryMessage) <- data
-	case encoding.TextMarshaler:
-		data, err := mes.MarshalText()
-		if err != nil {
-			return fmt.Errorf("Failed to marshal into text with err : %w\n", err)
-		}
-		c.Write(websocket.TextMessage) <- data
 	default:
-		data, err := json.Marshal(i)
-		if err != nil {
-			return fmt.Errorf("Failed to marshal into json with err : %w\n", err)
-		}
-		c.Write(websocket.TextMessage) <- data
+		return fmt.Errorf("unhandle message type to write")
 	}
 	return nil
 }
 
+func (c *Socket) SendMessage(i interface{}) error {
+	switch mes := i.(type) {
+	case []byte:
+		return c.Write(websocket.BinaryMessage, mes)
+	case string:
+		return c.Write(websocket.TextMessage, []byte(mes))
+	case encoding.BinaryMarshaler:
+		data, err := mes.MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("failed to marshal into binary with err : %w", err)
+		}
+		return c.Write(websocket.BinaryMessage, data)
+	case encoding.TextMarshaler:
+		data, err := mes.MarshalText()
+		if err != nil {
+			return fmt.Errorf("failed to marshal into text with err : %w", err)
+		}
+		return c.Write(websocket.TextMessage, data)
+	default:
+		data, err := json.Marshal(i)
+		if err != nil {
+			return fmt.Errorf("failed to marshal into json with err : %w", err)
+		}
+		return c.Write(websocket.TextMessage, data)
+	}
+}
+
 func (c *Socket) concurrentRead() {
-	defer func() {
-		c.Close()
-	}()
-	c.co.SetReadDeadline(time.Now().Add(pongWait))
-	c.co.SetPongHandler(func(appData string) error {
+
+	c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.Conn.SetPongHandler(func(appData string) error {
 		log.Printf("Receive pong %v\n", appData)
-		c.co.SetReadDeadline(time.Now().Add(pongWait))
+		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+		c.activitySrc <- struct{}{}
 		return nil
 	})
+
+	defer func() {
+		c.closingSrc <- struct{}{}
+		close(c.closingSrc)
+	}()
 	for {
-		_, b, err := c.co.ReadMessage()
+		_, b, err := c.Conn.ReadMessage()
 		if err != nil {
-			log.Printf("Error reading from socket: %v - Closing it\n", err)
-			select {
-			case c.errc <- err:
-			default:
-			}
+			c.dispatchError(err)
 			return
 		}
-		select {
-		case c.read <- b:
-
-		}
-	}
-}
-
-func (c *Socket) sendData(writer io.WriteCloser, data []byte, nextData <-chan []byte) error {
-	writer.Write(data)
-	n := len(nextData)
-	for i := 0; i < n; i++ {
-		writer.Write(<-nextData)
-	}
-	return writer.Close()
-}
-
-func (c *Socket) errAndClose(err error) {
-	log.Printf("Error writing to socket: %v\n", err)
-	if !c.closeState {
-		select {
-		case c.errc <- err:
-		default:
-			log.Printf("unable to send bwrite error to channel %v\n", err)
-		}
+		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+		log.Printf("read received")
+		c.activitySrc <- struct{}{}
+		c.read <- b
 	}
 }
 
 func (c *Socket) concurentWrite() {
-	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		c.Close()
-	}()
+	resetPing := func(nextPing *time.Timer) {
+		if !nextPing.Stop() {
+			select {
+			case <-nextPing.C:
+			default:
+			}
+		}
+		nextPing.Reset(pingPeriod)
+	}
+	nextPing := time.NewTimer(pingPeriod)
+	close := c.closingDispatcher.GetNewSubscriber()
+	activity := c.activityDispatcher.GetNewSubscriber()
 	for {
 		select {
 		case b := <-c.bwrite:
-
-			writer, err := c.co.NextWriter(websocket.BinaryMessage)
-			if err != nil {
-				c.errAndClose(err)
+			if err := c.writeData(websocket.BinaryMessage, b, c.bwrite); err != nil {
+				c.dispatchError(err)
 				return
 			}
-			if err := c.sendData(writer, b, c.bwrite); err != nil {
-				c.errAndClose(err)
-				return
-			}
-
 		case t := <-c.twrite:
-			writer, err := c.co.NextWriter(websocket.TextMessage)
-			if err != nil {
-				c.errAndClose(err)
+			if err := c.writeData(websocket.TextMessage, t, c.twrite); err != nil {
+				c.dispatchError(err)
 				return
 			}
-			if err := c.sendData(writer, t, c.twrite); err != nil {
-				c.errAndClose(err)
+		case <-close:
+			log.Printf("receive close dispatch in write")
+			return
+		case <-activity:
+			resetPing(nextPing)
+		case <-nextPing.C:
+			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+			log.Printf("Write ping")
+			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				c.dispatchError(err)
 				return
 			}
-		case <-ticker.C:
-			c.co.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.co.WriteMessage(websocket.PingMessage, nil); err != nil {
-				c.errAndClose(err)
-				return
-			}
+			resetPing(nextPing)
 		}
 	}
 }
 
+func (c *Socket) writeData(messageType int, data []byte, nextData <-chan []byte) error {
+	writer, err := c.Conn.NextWriter(messageType)
+	if err != nil {
+		return err
+	}
+	_, err = writer.Write(data)
+	if err != nil {
+		return err
+	}
+	n := len(nextData)
+	for i := 0; i < n; i++ {
+		writer.Write(<-nextData)
+	}
+	err = writer.Close()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Socket) dispatchError(err error) {
+	log.Printf("Dispatch error: %v\n", err)
+	select {
+	case c.errc <- err:
+	default:
+		log.Printf("unable to dispatch error on error chan %v\n", err)
+	}
+}
+
+func NewSocket(conn *websocket.Conn) *Socket {
+	closingSrc, closingDispatcher := NewChanDispatcher()
+	activitySrc, activityDispatcher := NewChanDispatcher()
+	cl := &Socket{Conn: conn,
+		closingSrc:         closingSrc,
+		closingDispatcher:  closingDispatcher,
+		activitySrc:        activitySrc,
+		activityDispatcher: activityDispatcher,
+		twrite:             make(chan []byte, 256),
+		read:               make(chan []byte, 256),
+		bwrite:             make(chan []byte, 256),
+		errc:               make(chan error)}
+	go cl.concurentWrite()
+	go cl.handleClose()
+	go cl.concurrentRead()
+	return cl
+}
 func ConnectSocket(addr string, header http.Header) (*Socket, error) {
 	conn, resp, err := websocket.DefaultDialer.Dial(addr, header)
 	if err == websocket.ErrBadHandshake {
@@ -202,10 +280,7 @@ func ConnectSocket(addr string, header http.Header) (*Socket, error) {
 	if err != nil {
 		return nil, err
 	}
-	cl := &Socket{co: conn, twrite: make(chan []byte, 256), read: make(chan []byte, 256), bwrite: make(chan []byte, 256), errc: make(chan error), closeState: false}
-	go cl.concurentWrite()
-	go cl.concurrentRead()
-	return cl, nil
+	return NewSocket(conn), nil
 }
 
 func AcceptNewSocket(w http.ResponseWriter, r *http.Request) (*Socket, error) {
@@ -214,10 +289,7 @@ func AcceptNewSocket(w http.ResponseWriter, r *http.Request) (*Socket, error) {
 		return nil, err
 	}
 
-	cl := &Socket{co: conn, twrite: make(chan []byte, 256), read: make(chan []byte, 256), bwrite: make(chan []byte, 256), errc: make(chan error), closeState: false}
-	go cl.concurentWrite()
-	go cl.concurrentRead()
-	return cl, nil
+	return NewSocket(conn), nil
 }
 
 func initSocket(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
