@@ -3,11 +3,12 @@ package wsocket
 import (
 	"encoding"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -156,7 +157,7 @@ func (c *Socket) concurrentRead() {
 
 	c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.Conn.SetPongHandler(func(appData string) error {
-		log.Printf("Receive pong %v\n", appData)
+		// log.Printf("Receive pong %v\n", appData)
 		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 		c.activitySrc <- struct{}{}
 		return nil
@@ -173,7 +174,6 @@ func (c *Socket) concurrentRead() {
 			return
 		}
 		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
-		log.Printf("read received")
 		c.activitySrc <- struct{}{}
 		c.read <- b
 	}
@@ -211,7 +211,7 @@ func (c *Socket) concurentWrite() {
 			resetPing(nextPing)
 		case <-nextPing.C:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
-			log.Printf("Write ping")
+			// log.Printf("Write ping")
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				c.dispatchError(err)
 				return
@@ -270,12 +270,12 @@ func NewSocket(conn *websocket.Conn) *Socket {
 func ConnectSocket(addr string, header http.Header) (*Socket, error) {
 	conn, resp, err := websocket.DefaultDialer.Dial(addr, header)
 	if err == websocket.ErrBadHandshake {
-		log.Printf("handshake failed with status %d, %+v\n", resp.StatusCode, resp)
-		io.Copy(os.Stdout, resp.Body)
+		w := &strings.Builder{}
+		io.Copy(w, resp.Body)
 		resp.Body.Close()
-		log.Fatalf("failed")
+		return nil, errors.New(w.String())
 	} else if err != nil {
-		log.Fatal("dial:", err)
+		return nil, err
 	}
 	if err != nil {
 		return nil, err
